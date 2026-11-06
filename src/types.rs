@@ -74,6 +74,7 @@ struct Mixer {
     drv: String,
     level: Elem,
     amp_gain: Elem,
+    max_volume_db: f32,
 }
 
 impl Mixer {
@@ -104,11 +105,12 @@ impl Mixer {
 
         is.val.set_boolean(0, true);
         helpers::write_ev(card, &is.val, &is.elem_name);
-        helpers::read_ev(card, &mut vs.val, &vs.elem_name);
-        assert!(vs.val.get_boolean(0).unwrap());
+        helpers::read_ev(card, &mut is.val, &is.elem_name);
+        assert!(is.val.get_boolean(0).unwrap());
 
         let mut ret = Mixer {
             drv: name.to_owned(),
+            max_volume_db: globals.max_volume_db,
             level: Elem::new(
                 prefix.clone() + &globals.ctl_volume,
                 card,
@@ -167,7 +169,8 @@ impl Mixer {
     */
 
     fn set_lvl(&mut self, card: &Ctl, lvl: f32) {
-        let new_val: i32 = helpers::db_to_int(card, &self.level.id, lvl);
+        assert!(lvl.is_finite(), "Nonfinite speaker gain");
+        let new_val: i32 = helpers::db_to_int(card, &self.level.id, lvl.min(self.max_volume_db));
 
         match self.level.val.set_integer(0, new_val) {
             Some(_) => {}
@@ -177,11 +180,14 @@ impl Mixer {
         };
 
         helpers::write_ev(card, &self.level.val, &self.level.elem_name);
+        helpers::read_ev(card, &mut self.level.val, &self.level.elem_name);
+        assert_eq!(self.level.val.get_integer(0), Some(new_val));
     }
 }
 
 #[derive(Clone)]
 pub struct Globals {
+    pub max_volume_db: f32,
     pub visense_pcm: usize,
     pub channels: usize,
     pub period: usize,
@@ -198,7 +204,16 @@ pub struct Globals {
 
 impl Globals {
     pub fn parse(config: &Ini) -> Self {
+        let max_volume_db = config
+            .getfloat("Globals", "max_volume_db")
+            .expect("Globals/max_volume_db: Invalid value")
+            .unwrap_or(0.0) as f32;
+        assert!(
+            max_volume_db.is_finite() && (-100.0..=0.0).contains(&max_volume_db),
+            "Globals/max_volume_db: Expected a finite value in [-100, 0] dB"
+        );
         Self {
+            max_volume_db,
             visense_pcm: helpers::parse_int(config, "Globals", "visense_pcm"),
             channels: helpers::parse_int(config, "Globals", "channels"),
             period: helpers::parse_int(config, "Globals", "period"),
@@ -257,19 +272,76 @@ pub struct Speaker {
     vs_scale: f32,
     is_chan: usize,
     vs_chan: usize,
+    current_delay_samples: usize,
+    current_delay_rate: u32,
+    previous_current: Option<f32>,
 
     g: Globals,
     pub s: SpeakerState,
 }
 
 impl Speaker {
+    pub fn parse_volume_cap(globals: &Globals, name: &str, config: &Ini) -> f32 {
+        let section = "Speaker/".to_owned() + name;
+        let ceiling = config
+            .getfloat(&section, "max_volume_db")
+            .expect("Invalid per-speaker volume ceiling")
+            .unwrap_or(globals.max_volume_db as f64) as f32;
+        assert!(
+            ceiling.is_finite() && (-100.0..=globals.max_volume_db).contains(&ceiling),
+            "{}: Speaker ceiling must be finite and cannot exceed the global ceiling",
+            name
+        );
+        ceiling
+    }
+
+    pub fn parse_sense_delay(name: &str, config: &Ini) -> (usize, u32) {
+        let section = "Speaker/".to_owned() + name;
+        let delay =
+            helpers::parse_opt_int::<usize>(config, &section, "current_delay_samples").unwrap_or(0);
+        let rate =
+            helpers::parse_opt_int::<u32>(config, &section, "current_delay_rate").unwrap_or(0);
+        assert!(
+            delay <= 1,
+            "{}: Only zero or one current-delay sample is supported",
+            name
+        );
+        assert!(
+            (delay == 0 && rate == 0) || (delay == 1 && rate > 0),
+            "{}: A current delay requires its measured sample rate",
+            name
+        );
+        (delay, rate)
+    }
+
+    pub fn reset_sense_history(&mut self) {
+        self.previous_current = None;
+        debug!("{}: Reset sense history", self.name);
+    }
+
+    pub fn validate_sample_rate(&self, sample_rate: u32) {
+        assert!(
+            self.current_delay_samples == 0 || sample_rate == self.current_delay_rate,
+            "{}: Sense delay has not been qualified at {} Hz",
+            self.name,
+            sample_rate
+        );
+    }
+
     pub fn new(globals: &Globals, name: &str, config: &Ini, ctl: &Ctl, cold_boot: bool) -> Speaker {
         info!("Speaker [{}]:", name);
 
         let section = "Speaker/".to_owned() + name;
+        let (current_delay_samples, current_delay_rate) = Self::parse_sense_delay(name, config);
+        let mut mixer_globals = globals.clone();
+        mixer_globals.max_volume_db = Self::parse_volume_cap(globals, name, config);
+        info!(
+            "  Digital volume ceiling: {:.2} dB",
+            mixer_globals.max_volume_db
+        );
         let mut new_speaker: Speaker = Speaker {
             name: name.to_string(),
-            alsa_iface: Mixer::new(name, ctl, globals),
+            alsa_iface: Mixer::new(name, ctl, &mixer_globals),
             group: helpers::parse_int(config, &section, "group"),
             tau_coil: helpers::parse_float(config, &section, "tau_coil"),
             tau_magnet: helpers::parse_float(config, &section, "tau_magnet"),
@@ -282,6 +354,9 @@ impl Speaker {
             vs_scale: helpers::parse_float(config, &section, "vs_scale"),
             is_chan: helpers::parse_int(config, &section, "is_chan"),
             vs_chan: helpers::parse_int(config, &section, "vs_chan"),
+            current_delay_samples,
+            current_delay_rate,
+            previous_current: None,
             g: globals.clone(),
             s: Default::default(),
         };
@@ -331,13 +406,30 @@ impl Speaker {
         let alpha_magnet = (step / (self.tau_magnet + step)) as f64;
 
         let mut pwr_sum = 0f32;
+        let mut priming_samples = 0usize;
 
         for sample in buf.chunks(self.g.channels) {
             assert!(sample.len() == self.g.channels);
 
             let v = sample[self.vs_chan] as f32 / 32768.0 * self.vs_scale;
             let i = sample[self.is_chan] as f32 / 32768.0 * self.is_scale;
-            let p = v * i;
+            let p = if self.current_delay_samples == 0 {
+                v * i
+            } else {
+                // Voltage is one sample later than current on the measured path.
+                // Preserve current history across reads, but never across gaps.
+                let p = match self.previous_current {
+                    Some(previous) => v * previous,
+                    // The missing current is unknown: use its full-scale upper
+                    // bound, never zero, for this first sample after a reset.
+                    None => {
+                        priming_samples += 1;
+                        v.abs() * self.is_scale
+                    }
+                };
+                self.previous_current = Some(i);
+                p
+            };
 
             let t_coil_target = s.t_magnet + (p * self.tr_coil) as f64;
             let t_magnet_target = (self.g.t_ambient + p * self.tr_magnet) as f64;
@@ -373,6 +465,15 @@ impl Speaker {
                 self.name, pwr_avg
             );
         }
+        debug!(
+            "SENSE name={} frames={} rate={} delay={} priming={} power={:.9}",
+            self.name,
+            buf.len() / self.g.channels,
+            sample_rate,
+            self.current_delay_samples,
+            priming_samples,
+            pwr_avg
+        );
         let pwr_avg = pwr_avg.max(0.0);
 
         s.t_coil_hyst = s
@@ -404,6 +505,7 @@ impl Speaker {
     }
 
     pub fn skip_model(&mut self, time: f64) {
+        self.reset_sense_history();
         let s = &mut self.s;
         let t_coil = s.t_coil - self.g.t_ambient as f64;
         let t_magnet = s.t_magnet - self.g.t_ambient as f64;
