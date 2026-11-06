@@ -9,6 +9,7 @@
 */
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::panic::{catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +39,9 @@ struct Options {
     /// Path to the configuration file base directory
     #[arg(short, long)]
     config_path: Option<PathBuf>,
+    /// Record at most 20 seconds of raw S16_LE sense PCM for hardware diagnosis
+    #[arg(long)]
+    sense_capture: Option<PathBuf>,
 
     /// Increase the log level
     #[command(flatten)]
@@ -135,6 +139,11 @@ fn main() {
     cfg.load(config_path).expect("Failed to read config file");
 
     let globals = types::Globals::parse(&cfg);
+    // Reject invalid delay and ceiling declarations before opening mixer controls.
+    for name in get_speakers(&cfg) {
+        types::Speaker::parse_sense_delay(&name, &cfg);
+        types::Speaker::parse_volume_cap(&globals, &name, &cfg);
+    }
 
     if globals.uclamp_min.is_some() || globals.uclamp_max.is_some() {
         uclamp::set_uclamp(
@@ -143,6 +152,14 @@ fn main() {
         );
     }
 
+    let mut sense_capture = args.sense_capture.as_ref().map(|path| {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("Could not create sense diagnostic file")
+    });
+    let mut sense_frames_left = 48000usize * 20;
     let result = catch_unwind(move || {
         let speaker_names = get_speakers(&cfg);
         let speaker_count = speaker_names.len();
@@ -185,19 +202,16 @@ fn main() {
                 .push(speaker);
         }
 
-        assert!(
-            groups
-                .values()
-                .map(|a| a.speakers.len())
-                .sum::<usize>()
-                == speaker_count
-        );
+        assert!(groups.values().map(|a| a.speakers.len()).sum::<usize>() == speaker_count);
         assert!(2 * speaker_count <= globals.channels);
 
         let pcm_name = format!("{},{}", device, globals.visense_pcm);
         // Set up PCM to buffer in V/ISENSE
-        let mut pcm: Option<alsa::pcm::PCM> =
-            Some(helpers::open_pcm(&pcm_name, globals.channels.try_into().unwrap(), 0));
+        let mut pcm: Option<alsa::pcm::PCM> = Some(helpers::open_pcm(
+            &pcm_name,
+            globals.channels.try_into().unwrap(),
+            0,
+        ));
         let mut io = Some(pcm.as_ref().unwrap().io_i16().unwrap());
 
         let mut sample_rate_elem = types::Elem::new(
@@ -267,8 +281,17 @@ fn main() {
                         warn!("Reinitializing PCM to work around kernel bug...");
                         io = None;
                         pcm = None;
-                        pcm = Some(helpers::open_pcm(&pcm_name, globals.channels.try_into().unwrap(), 0));
+                        pcm = Some(helpers::open_pcm(
+                            &pcm_name,
+                            globals.channels.try_into().unwrap(),
+                            0,
+                        ));
                         io = Some(pcm.as_ref().unwrap().io_i16().unwrap());
+                        for group in groups.values_mut() {
+                            for speaker in &mut group.speakers {
+                                speaker.reset_sense_history();
+                            }
+                        }
                         continue;
                     }
                     Err(e)
@@ -285,16 +308,40 @@ fn main() {
             }
 
             let buf_read = &buf[0..read * globals.channels];
+            if let Some(file) = sense_capture.as_mut() {
+                let frames = read.min(sense_frames_left);
+                let bytes: Vec<u8> = buf_read[..frames * globals.channels]
+                    .iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect();
+                file.write_all(&bytes)
+                    .expect("Sense diagnostic write failed");
+                sense_frames_left -= frames;
+                if sense_frames_left == 0 {
+                    sense_capture = None;
+                }
+            }
 
             let cur_sample_rate = sample_rate_elem.read_int(&ctl);
 
             if cur_sample_rate != 0 && cur_sample_rate != sample_rate {
                 sample_rate = cur_sample_rate;
                 info!("Sample rate: {}", sample_rate);
+                for group in groups.values_mut() {
+                    for speaker in &mut group.speakers {
+                        speaker.reset_sense_history();
+                    }
+                }
             }
 
             if sample_rate == 0 {
                 panic!("Invalid sample rate");
+            }
+
+            for group in groups.values() {
+                for speaker in &group.speakers {
+                    speaker.validate_sample_rate(sample_rate.try_into().unwrap());
+                }
             }
 
             let now = Instant::now();
