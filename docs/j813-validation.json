@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "qualification": "Capped 48 kHz J813 playback; operator confirmed clear, comfortable speech",
+  "linux_head": "ad4910ce6ec1aef2b663e9f6fc8af2436a739742",
+  "implementation_commit": "bc02275266a0824f9bbb2fa2f970b8b737f1c319",
+  "binary_sha256": "ff1f8de5840930d099d9bebe121e20c78f0dc51f1f915120334e2d7a42468b57",
+  "profile_sha256": "6c263f9af6a0c5ce364f375be2c6b34d63d011382366b24b51059f2bc35f6b3c",
+  "limits_db": [
+    -24,
+    -24,
+    -32,
+    -32
+  ],
+  "active_feedback_delay_samples": [
+    1,
+    0,
+    0,
+    0
+  ],
+  "speaker_order": [
+    "Left Woofer",
+    "Right Woofer",
+    "Left Tweeter",
+    "Right Tweeter"
+  ],
+  "speech_power_replay_observations": 776,
+  "speech_archive_sha256": "a129cc45086e4cf79b4980c207bd5bebd0c8a9883255d76981187f9e69e5561b",
+  "endurance": {
+    "passed": true,
+    "source_audio_seconds": 173.523,
+    "repeats": 16,
+    "limits_db": [
+      -24,
+      -24,
+      -32,
+      -32
+    ],
+    "telemetry": {
+      "Left Woofer": {
+        "periods": 2050,
+        "max_period_power_W": 0.012377196,
+        "max_estimated_coil_C": 77.82,
+        "final_estimated_coil_C": 51.05
+      },
+      "Right Woofer": {
+        "periods": 2050,
+        "max_period_power_W": 0.011952098,
+        "max_estimated_coil_C": 77.82,
+        "final_estimated_coil_C": 51.04
+      },
+      "Left Tweeter": {
+        "periods": 2050,
+        "max_period_power_W": 0.000312615,
+        "max_estimated_coil_C": 75.89,
+        "final_estimated_coil_C": 50.63
+      },
+      "Right Tweeter": {
+        "periods": 2050,
+        "max_period_power_W": 0.000312629,
+        "max_estimated_coil_C": 75.89,
+        "final_estimated_coil_C": 50.63
+      }
+    },
+    "captured_prefix_power_replay_observations": 936,
+    "capture_prefix_frames": 960000,
+    "kernel_delta": "snd-soc-macaudio sound: Speaker volumes unlocked\nsnd-soc-macaudio sound: Speaker volumes locked: Lock timeout\n",
+    "final_streams_closed": 5,
+    "taint": 0,
+    "archive_sha256": "c3572533552cca6b0ee3d14adcde273d00773b7242eaf60dd5b4dfe6b8bc6ba8",
+    "notes": [
+      "Temperature figures are model estimates, not thermometry.",
+      "Diagnostic raw feedback is limited to the initial 20 seconds; telemetry covers the full run.",
+      "The bounded run completed; the user then requested no further repeating audio and the device was independently verified muted."
+    ]
+  },
+  "final_public_zero_pcm": {
+    "all_zero_pcm": true,
+    "four_speaker_ceiling_db": [
+      -24,
+      -24,
+      -32,
+      -32
+    ],
+    "all_four_relocked_after_daemon_stall": true,
+    "taint": 0,
+    "closed_streams": 5,
+    "archive_sha256": "b454a1c19e1303a8a743d64ce1855f5b21981a67177f1ab79231f14c943f1c01"
+  },
+  "package_installation": {
+    "passed": true,
+    "source_commit": "bc02275266a0824f9bbb2fa2f970b8b737f1c319",
+    "profile_sha256": "6c263f9af6a0c5ce364f375be2c6b34d63d011382366b24b51059f2bc35f6b3c",
+    "binary_sha256": "ff1f8de5840930d099d9bebe121e20c78f0dc51f1f915120334e2d7a42468b57",
+    "udev_j813_rule_installed": true,
+    "systemd_runtime_not_tested_on_initramfs": true
+  },
+  "boundaries": [
+    "No native LSM2 parity or maximum-loudness qualification",
+    "No calibrated frequency-response claim",
+    "No complete desktop-routing or systemd-autostart hardware test",
+    "Raw recordings, native tuning and unit identifiers are not distributed"
+  ]
+}
