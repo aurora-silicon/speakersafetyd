@@ -242,6 +242,7 @@ fn main() {
         }
 
         let mut last_update = Instant::now();
+        let mut last_thermal = Instant::now();
 
         let mut buf = Vec::new();
         buf.resize(globals.period * globals.channels, 0i16);
@@ -389,6 +390,17 @@ fn main() {
 
             if all_nominal {
                 once_nominal = true;
+            }
+
+            if (now - last_thermal).as_secs_f64() >= 10. {
+                last_thermal = now;
+                for group in groups.values_mut() {
+                    for speaker in &mut group.speakers {
+                        if let Some(line) = speaker.thermal_summary() {
+                            info!("{}", line);
+                        }
+                    }
+                }
             }
 
             unlock_elem.write_int(&ctl, UNLOCK_MAGIC);
