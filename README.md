@@ -1,6 +1,7 @@
 ## speakersafetyd - a software Smart Amp implementation
 
 Aurora J813 capped-profile details and qualification: [docs/j813.md](docs/j813.md).
+Aurora J815 capped-profile details and qualification: [docs/j815.md](docs/j815.md).
 speakersafetyd is a userspace daemon written in Rust that implements an
 analogue of the Texas Instruments Smart Amp speaker protection model.
 
