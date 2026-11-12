@@ -257,9 +257,21 @@ pub struct SpeakerState {
     pub gain: f32,
 }
 
+/// What the thermal model saw since the last THERMAL summary line.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ThermalWindow {
+    pub peak_coil: f64,
+    pub peak_magnet: f64,
+    pub peak_power: f32,
+    pub energy: f64,
+    pub seconds: f64,
+    pub reported: bool,
+}
+
 pub struct Speaker {
     pub name: String,
     pub group: usize,
+    thermal: ThermalWindow,
     alsa_iface: Mixer,
     tau_coil: f32,
     tau_magnet: f32,
@@ -359,6 +371,7 @@ impl Speaker {
             previous_current: None,
             g: globals.clone(),
             s: Default::default(),
+            thermal: Default::default(),
         };
 
         let s = &mut new_speaker.s;
@@ -396,6 +409,32 @@ impl Speaker {
         info!("  Min gain: {:.2} dB", s.min_gain);
 
         new_speaker
+    }
+
+    /// One INFO line for the window since the last call, while the speaker draws at least 1 mW or the
+    /// gain is reduced, plus one trailing line when that stops (so the cool-down start is logged too).
+    pub fn thermal_summary(&mut self) -> Option<String> {
+        let w = self.thermal;
+        let active = w.peak_power >= 0.001 || self.s.gain != 0.;
+        self.thermal = ThermalWindow {
+            reported: active,
+            ..Default::default()
+        };
+        if !(active || w.reported) || w.seconds <= 0. {
+            return None;
+        }
+        Some(format!(
+            "THERMAL {}: coil {:.1} C (peak {:.1}) magnet {:.1} C (peak {:.1}) power avg {:.4} W peak {:.4} W over {:.1} s gain {:.2} dB",
+            self.name,
+            self.s.t_coil,
+            w.peak_coil,
+            self.s.t_magnet,
+            w.peak_magnet,
+            w.energy / w.seconds,
+            w.peak_power,
+            w.seconds,
+            self.s.gain
+        ))
     }
 
     pub fn run_model(&mut self, buf: &[i16], sample_rate: f32) -> f32 {
@@ -475,6 +514,15 @@ impl Speaker {
             pwr_avg
         );
         let pwr_avg = pwr_avg.max(0.0);
+        {
+            let w = &mut self.thermal;
+            let secs = (buf.len() / self.g.channels) as f64 / sample_rate as f64;
+            w.peak_coil = w.peak_coil.max(s.t_coil);
+            w.peak_magnet = w.peak_magnet.max(s.t_magnet);
+            w.peak_power = w.peak_power.max(pwr_avg);
+            w.energy += pwr_avg as f64 * secs;
+            w.seconds += secs;
+        }
 
         s.t_coil_hyst = s
             .t_coil_hyst
