@@ -15,7 +15,7 @@ vendors in both the desktop and embedded/Android worlds are choosing to go down 
 route, folding this functionality into proprietary driver/userspace blobs that usually
 also bundle niceties like EQ (we have a solution for this too, see [asahi-audio](https://github.com/AsahiLinux/asahi-audio)).
 This puts users at serious risk of permanently destroying their expensive devices if they choose
-to run custom software, such as Asahi Linux or an Open Source Android ROM.
+to run custom software, such as Aurora or an Open Source Android ROM.
 
 speakersafetyd is the first (as far as we know) FOSS implementation of a speaker
 protection model. It solves the problem described above by allowing parties interested
@@ -27,7 +27,7 @@ adapt for any device that provides V/ISENSE data in a manner similar to TAS2764.
 ### Dependencies
 * Rust stable
 * alsa-lib
-* An Apple Silicon Mac running Asahi Linux
+* An Apple Silicon Mac running Aurora
 * A `speakersafetyd` user in the `audio` group (except if using systemd and `DynamicUser=yes`)
 
 ### Some background on Smart Amps
