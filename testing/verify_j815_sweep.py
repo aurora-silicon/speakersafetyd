@@ -104,6 +104,8 @@ def main():
     conf = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else str(Path(__file__).resolve().parents[1] / 'conf/apple/j815.conf')
     out = Path(sys.argv[3]) if len(sys.argv) > 3 else d / 'SPKSWEEP-REPORT.json'
     glob, spk = load_conf(conf)
+    global CH
+    CH = int(glob.get('channels', CH))  # the profile's feedback channel count
     sig = json.loads((d / 'signal.json').read_text())
     rawp = d / 'sense.raw.gz'
     raw = np.frombuffer(gzip.open(rawp).read() if rawp.exists() else (d / 'sense.raw').read_bytes(), '<i2')
@@ -134,7 +136,7 @@ def main():
         xtalk = float(others.max() / pair_rms[act]) if pair_rms[act] else float('inf')
         vs = int(c.get('vs_chan', -1)); is_ = int(c.get('is_chan', -1))
         vsc = float(c.get('vs_scale', 14)); isc = float(c.get('is_scale', 3.75)); znom = float(c.get('z_nominal', 0))
-        cfg_delay = int(c.get('current_delay_samples', 0))
+        cfg_delay = int(c.get('current_delay_samples', 0)) - int(c.get('voltage_delay_samples', 0))
         hyps = {}
         for label, (cv, ci) in (('even=V', (2 * act, 2 * act + 1)), ('odd=V', (2 * act + 1, 2 * act))):
             v = seg[:, cv] * vsc / 32768; i = seg[:, ci] * isc / 32768
@@ -184,7 +186,7 @@ def main():
         else:
             lag = best[1]; jb = hyps[best]
             if -lag != cfg_delay:
-                verdict.append(f'current lag {lag:+d} sample(s) (= current_delay_samples {-lag}); profile has {cfg_delay}')
+                verdict.append(f'current lag {lag:+d} sample(s) (= current_delay_samples {-lag}; negative = voltage_delay_samples {lag}); profile has {cfg_delay}')
             if len(cand) > 1:
                 verdict.append(f'lag ambiguous: {sorted(k[1] for k in cand)} all physical')
             if not (0.8 <= jb['r_ratio'] <= 1.3):
@@ -212,14 +214,17 @@ def main():
     for m in re.finditer(r'SENSE name=(.*?) frames=(\d+) rate=(\d+) delay=(\d+) priming=(\d+) power=(-?[\d.]+)', log):
         rows.setdefault(m[1], []).append((int(m[2]), int(m[4]), float(m[6])))
     for name, rr in rows.items():
-        c = spk[name]; vs = int(c['vs_chan']); is_ = int(c['is_chan']); dl = int(c.get('current_delay_samples', 0))
+        c = spk[name]; vs = int(c['vs_chan']); is_ = int(c['is_chan']); dl = int(c.get('current_delay_samples', 0)); vdl = int(c.get('voltage_delay_samples', 0))
         at, prev, errs = 0, None, []
         for frames, delay, power in rr:
             if at + frames > len(raw):
                 break
             v = raw[at:at + frames, vs] * float(c['vs_scale']) / 32768
             i = raw[at:at + frames, is_] * float(c['is_scale']) / 32768
-            if dl:
+            if vdl:
+                vv = np.empty_like(v); vv[vdl:] = v[:-vdl]; vv[:vdl] = prev if prev is not None else float(c['vs_scale']) * np.sign(i[0]); prev = v[-1]
+                al = i; v = vv
+            elif dl:
                 al = np.empty_like(i); al[dl:] = i[:-dl]; al[:dl] = prev if prev is not None else float(c['is_scale']) * np.sign(v[0]); prev = i[-1]
             else:
                 al = i

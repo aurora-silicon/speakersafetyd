@@ -287,6 +287,9 @@ pub struct Speaker {
     current_delay_samples: usize,
     current_delay_rate: u32,
     previous_current: Option<f32>,
+    voltage_delay_samples: usize,
+    voltage_delay_rate: u32,
+    previous_voltage: Option<f32>,
 
     g: Globals,
     pub s: SpeakerState,
@@ -307,33 +310,51 @@ impl Speaker {
         ceiling
     }
 
-    pub fn parse_sense_delay(name: &str, config: &Ini) -> (usize, u32) {
+    fn parse_one_delay(name: &str, config: &Ini, which: &str) -> (usize, u32) {
         let section = "Speaker/".to_owned() + name;
         let delay =
-            helpers::parse_opt_int::<usize>(config, &section, "current_delay_samples").unwrap_or(0);
+            helpers::parse_opt_int::<usize>(config, &section, &format!("{}_delay_samples", which))
+                .unwrap_or(0);
         let rate =
-            helpers::parse_opt_int::<u32>(config, &section, "current_delay_rate").unwrap_or(0);
+            helpers::parse_opt_int::<u32>(config, &section, &format!("{}_delay_rate", which))
+                .unwrap_or(0);
         assert!(
             delay <= 1,
-            "{}: Only zero or one current-delay sample is supported",
-            name
+            "{}: Only zero or one {}-delay sample is supported",
+            name,
+            which
         );
         assert!(
             (delay == 0 && rate == 0) || (delay == 1 && rate > 0),
-            "{}: A current delay requires its measured sample rate",
-            name
+            "{}: A {} delay requires its measured sample rate",
+            name,
+            which
         );
         (delay, rate)
     }
 
+    /// Returns (current delay, its rate, voltage delay, its rate). At most one side may be delayed.
+    pub fn parse_sense_delay(name: &str, config: &Ini) -> (usize, u32, usize, u32) {
+        let (cd, cr) = Self::parse_one_delay(name, config, "current");
+        let (vd, vr) = Self::parse_one_delay(name, config, "voltage");
+        assert!(
+            cd == 0 || vd == 0,
+            "{}: Delay either the current or the voltage feedback, not both",
+            name
+        );
+        (cd, cr, vd, vr)
+    }
+
     pub fn reset_sense_history(&mut self) {
         self.previous_current = None;
+        self.previous_voltage = None;
         debug!("{}: Reset sense history", self.name);
     }
 
     pub fn validate_sample_rate(&self, sample_rate: u32) {
         assert!(
-            self.current_delay_samples == 0 || sample_rate == self.current_delay_rate,
+            (self.current_delay_samples == 0 || sample_rate == self.current_delay_rate)
+                && (self.voltage_delay_samples == 0 || sample_rate == self.voltage_delay_rate),
             "{}: Sense delay has not been qualified at {} Hz",
             self.name,
             sample_rate
@@ -344,7 +365,8 @@ impl Speaker {
         info!("Speaker [{}]:", name);
 
         let section = "Speaker/".to_owned() + name;
-        let (current_delay_samples, current_delay_rate) = Self::parse_sense_delay(name, config);
+        let (current_delay_samples, current_delay_rate, voltage_delay_samples, voltage_delay_rate) =
+            Self::parse_sense_delay(name, config);
         let mut mixer_globals = globals.clone();
         mixer_globals.max_volume_db = Self::parse_volume_cap(globals, name, config);
         info!(
@@ -369,6 +391,9 @@ impl Speaker {
             current_delay_samples,
             current_delay_rate,
             previous_current: None,
+            voltage_delay_samples,
+            voltage_delay_rate,
+            previous_voltage: None,
             g: globals.clone(),
             s: Default::default(),
             thermal: Default::default(),
@@ -452,7 +477,21 @@ impl Speaker {
 
             let v = sample[self.vs_chan] as f32 / 32768.0 * self.vs_scale;
             let i = sample[self.is_chan] as f32 / 32768.0 * self.is_scale;
-            let p = if self.current_delay_samples == 0 {
+            let p = if self.voltage_delay_samples != 0 {
+                // Current is one sample later than voltage on the measured path.
+                // Preserve voltage history across reads, but never across gaps.
+                let p = match self.previous_voltage {
+                    Some(previous) => previous * i,
+                    // The missing voltage is unknown: use its full-scale upper
+                    // bound, never zero, for this first sample after a reset.
+                    None => {
+                        priming_samples += 1;
+                        i.abs() * self.vs_scale
+                    }
+                };
+                self.previous_voltage = Some(v);
+                p
+            } else if self.current_delay_samples == 0 {
                 v * i
             } else {
                 // Voltage is one sample later than current on the measured path.
@@ -505,13 +544,14 @@ impl Speaker {
             );
         }
         debug!(
-            "SENSE name={} frames={} rate={} delay={} priming={} power={:.9}",
+            "SENSE name={} frames={} rate={} delay={} priming={} power={:.9} vdelay={}",
             self.name,
             buf.len() / self.g.channels,
             sample_rate,
             self.current_delay_samples,
             priming_samples,
-            pwr_avg
+            pwr_avg,
+            self.voltage_delay_samples
         );
         let pwr_avg = pwr_avg.max(0.0);
         {
